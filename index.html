@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Pelatihan KLP1 AGRO 18/2025</title>
+
+  <!-- CSS -->
+  <link rel="stylesheet" href="./styles.css" />
+
+  <!-- XLSX (untuk import/export Excel) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+</head>
+<body>
+  <div class="container">
+    <!-- ================= HEADER ================= -->
+    <div class="header">
+      <h1>Program Pelatihan KLP1 AGRO</h1>
+      <p>Monitoring Kegiatan Pelatihan</p>
+    </div>
+
+    <!-- ============== MODAL: USER INFO ============== -->
+    <div class="modal" id="userInfoModal" aria-hidden="true">
+      <div class="modal-content">
+        <span class="close">×</span>
+        <h2>Informasi Peserta</h2>
+
+        <div class="form-group">
+          <label for="menteeName">Nama Mentee:</label>
+          <input id="menteeName" type="text" required />
+        </div>
+
+        <div class="form-group">
+          <label for="mentorName">Nama Mentor:</label>
+          <input id="mentorName" type="text" required />
+        </div>
+
+        <button id="saveUserInfo">Simpan</button>
+      </div>
+    </div>
+
+    <!-- ============== MODAL: ACTTYP MANAGEMENT ============== -->
+    <div class="modal" id="acttypModal" aria-hidden="true">
+      <div class="modal-content">
+        <span class="close">×</span>
+        <h2>Kelola ActTyp</h2>
+
+        <div class="form-group">
+          <label for="acttypType">Jenis:</label>
+          <select id="acttypType">
+            <option value="perawatan">Perawatan</option>
+            <option value="panen">Panen</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="newActtypCode">Kode ActTyp:</label>
+          <input id="newActtypCode" type="text" placeholder="Contoh: TMPM01" />
+        </div>
+
+        <div class="form-group">
+          <label for="newActtypDesc">Deskripsi:</label>
+          <input id="newActtypDesc" type="text" placeholder="Contoh: Pemupukan manual" />
+        </div>
+
+        <button id="addActtyp">Tambah ActTyp</button>
+        <div id="acttypList" style="margin-top: 20px;"></div>
+      </div>
+    </div>
+
+    <!-- ================== TABS =================== -->
+    <div class="tabs">
+      <div class="tab active" data-tab="perawatan">Perawatan</div>
+      <div class="tab" data-tab="panen">Panen &amp; Transport</div>
+      <div class="tab" data-tab="history">History</div>
+      <div class="tab" data-tab="settings">Pengaturan</div>
+    </div>
+
+    <!-- ================== TAB: PERAWATAN =================== -->
+    <div class="tab-content active" id="perawatan">
+      <h2>Laporan Perawatan</h2>
+
+      <div class="form-group">
+        <label for="perawatanEstate">Estate:</label>
+        <input id="perawatanEstate" type="text" list="estateList" />
+        <datalist id="estateList">
+          <option value="SRIE">
+          <option value="KRAI">
+          <option value="BAMI">
+          <option value="TOLI">
+        </datalist>
+      </div>
+
+      <div class="form-group">
+        <label for="perawatanDivisi">Divisi:</label>
+        <input id="perawatanDivisi" type="number" min="1" max="10" />
+      </div>
+
+      <div class="form-group">
+        <label for="perawatanBlok">Blok:</label>
+        <input id="perawatanBlok" type="text" />
+      </div>
+
+      <div class="form-group">
+        <label for="perawatanTanggal">Tanggal:</label>
+        <input id="perawatanTanggal" type="date" />
+      </div>
+
+      <div class="form-group">
+        <label for="perawatanActTyp">ActTyp:</label>
+        <select id="perawatanActTyp"></select>
+      </div>
+
+      <div class="form-group">
+        <label for="perawatanPekerjaan">Pekerjaan:</label>
+        <input id="perawatanPekerjaan" type="text" />
+      </div>
+
+      <div class="form-group">
+        <label for="perawatanRencanaHa">Rencana Ha:</label>
+        <input id="perawatanRencanaHa" type="number" min="0" step="0.01" />
+      </div>
+
+      <div class="form-group">
+        <label for="perawatanAktualHa">Aktual Ha:</label>
+        <input id="perawatanAktualHa" type="number" min="0" step="0.01" />
+      </div>
+
+      <div class="form-group">
+        <label>Tenaga Kerja:</label>
+        <div id="perawatanTenagaKerjaContainer"></div>
+        <button id="addPerawatanWorker" type="button" class="add-btn">+ Tenaga Kerja</button>
+      </div>
+
+      <div class="form-group">
+        <label>Bahan:</label>
+        <div id="perawatanBahanContainer"></div>
+        <button id="addPerawatanMaterial" type="button" class="add-btn">+ Bahan</button>
+      </div>
+
+      <div class="form-group">
+        <label for="perawatanKeterangan">Keterangan:</label>
+        <textarea id="perawatanKeterangan"></textarea>
+      </div>
+
+      <div class="button-group">
+        <button id="savePerawatan">Simpan</button>
+        <button id="generatePerawatanWA">Generate WA</button>
+        <button id="resetPerawatanForm">Reset</button>
+      </div>
+
+      <div id="perawatanReportPreview" class="report-preview" style="display:none;"></div>
+    </div>
+
+    <!-- ================== TAB: PANEN =================== -->
+    <div class="tab-content" id="panen">
+      <h2>Laporan Panen &amp; Transport</h2>
+
+      <div class="form-group">
+        <label for="panenEstate">Estate:</label>
+        <input id="panenEstate" type="text" list="estateList" />
+      </div>
+
+      <div class="form-group">
+        <label for="panenDivisi">Divisi:</label>
+        <input id="panenDivisi" type="number" min="1" max="10" />
+      </div>
+
+      <div class="form-group">
+        <label for="panenBlok">Blok:</label>
+        <input id="panenBlok" type="text" />
+      </div>
+
+      <div class="form-group">
+        <label for="panenTanggal">Tanggal:</label>
+        <input id="panenTanggal" type="date" />
+      </div>
+
+      <div class="form-group">
+        <label for="panenActTyp">ActTyp:</label>
+        <select id="panenActTyp"></select>
+      </div>
+
+      <div class="form-group">
+        <label for="panenPekerjaan">Pekerjaan:</label>
+        <input id="panenPekerjaan" type="text" />
+      </div>
+
+      <div class="form-group">
+        <label for="panenRencanaHa">Rencana Ha:</label>
+        <input id="panenRencanaHa" type="number" min="0" step="0.01" />
+      </div>
+
+      <div class="form-group">
+        <label for="panenRencanaTon">Rencana Ton:</label>
+        <input id="panenRencanaTon" type="number" min="0" step="0.01" />
+      </div>
+
+      <div class="form-group">
+        <label for="panenAktualHa">Aktual Ha:</label>
+        <input id="panenAktualHa" type="number" min="0" step="0.01" />
+      </div>
+
+      <div class="form-group">
+        <label for="panenAktualTon">Aktual Ton:</label>
+        <input id="panenAktualTon" type="number" min="0" step="0.01" />
+      </div>
+
+      <div class="form-group">
+        <label for="panenTenagaKerja">Tenaga Kerja:</label>
+        <input id="panenTenagaKerja" type="number" min="0" />
+      </div>
+
+      <div class="form-group">
+        <label for="panenKirimTon">Kirim Ton:</label>
+        <input id="panenKirimTon" type="number" min="0" step="0.01" />
+      </div>
+
+      <div class="form-group">
+        <label for="panenRestan">Restan:</label>
+        <input id="panenRestan" type="number" min="0" step="0.01" />
+      </div>
+
+      <div class="form-group">
+        <label for="panenPusingan">Pusingan:</label>
+        <input id="panenPusingan" type="text" placeholder="Contoh: 6/7" />
+      </div>
+
+      <div class="form-group">
+        <label for="panenFeeder">Feeder:</label>
+        <input id="panenFeeder" type="text" placeholder="Contoh: 2 unit" />
+      </div>
+
+      <div class="form-group">
+        <label for="panenTruk">Truk:</label>
+        <input id="panenTruk" type="text" placeholder="Contoh: 2 unit" />
+      </div>
+
+      <div class="form-group">
+        <label for="panenKeterangan">Keterangan:</label>
+        <textarea id="panenKeterangan"></textarea>
+      </div>
+
+      <div class="button-group">
+        <button id="savePanen">Simpan Laporan</button>
+        <button id="generatePanenWA">Generate WA</button>
+        <button id="resetPanenForm">Reset Form</button>
+      </div>
+
+      <div id="panenReportPreview" class="report-preview" style="display:none;"></div>
+    </div>
+
+    <!-- ================== TAB: HISTORY =================== -->
+    <div class="tab-content" id="history">
+      <h2>History Laporan</h2>
+
+      <div class="button-group">
+        <button id="exportData">Export</button>
+        <button id="importData">Import</button>
+        <input id="fileInput" type="file" accept=".xlsx,.xls" style="display:none;" />
+        <button id="syncData" class="secondary">Sync</button>
+        <button id="deleteAllData" class="danger">Delete</button>
+      </div>
+
+      <div id="syncStatus" class="sync-status"></div>
+
+      <div class="stats-container">
+        <div class="stat-card">
+          <div class="stat-title">Total Laporan</div>
+          <div class="stat-value" id="totalReports">0</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-title">Perawatan</div>
+          <div class="stat-value" id="totalPerawatan">0</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-title">Panen</div>
+          <div class="stat-value" id="totalPanen">0</div>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label for="filterDate">Filter Tanggal:</label>
+        <input id="filterDate" type="date" />
+        <button id="applyFilter">Terapkan Filter</button>
+        <button id="clearFilter">Hapus Filter</button>
+      </div>
+
+      <div class="form-group">
+        <label for="filterType">Filter Jenis:</label>
+        <select id="filterType">
+          <option value="all">Semua</option>
+          <option value="perawatan">Perawatan</option>
+          <option value="panen">Panen &amp; Transport</option>
+        </select>
+      </div>
+
+      <table id="historyTable">
+        <thead>
+          <tr>
+            <th>No</th>
+            <th>Tanggal</th>
+            <th>Jenis</th>
+            <th>Estate</th>
+            <th>Divisi</th>
+            <th>Blok</th>
+            <th>Pekerjaan</th>
+            <th>Ha/Ton</th>
+            <th>Aksi</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <!-- ================== TAB: SETTINGS =================== -->
+    <div class="tab-content" id="settings">
+      <h2>Pengaturan Aplikasi</h2>
+
+      <div class="form-group">
+        <h3>Informasi Pengguna</h3>
+        <p>Mentee: <span id="currentMentee">-</span></p>
+        <p>Mentor: <span id="currentMentor">-</span></p>
+        <button id="editUserInfo">Edit Informasi Pengguna</button>
+      </div>
+
+      <div class="form-group acttyp-management">
+        <h3>Kelola ActTyp</h3>
+        <p>Kelola daftar ActTyp untuk laporan perawatan dan panen</p>
+        <button id="manageActtyp">Kelola ActTyp</button>
+      </div>
+
+      <div class="form-group">
+        <h3>Reset Aplikasi</h3>
+        <p>Hapus semua data termasuk laporan dan pengaturan</p>
+        <button id="resetApp" class="danger">Reset Aplikasi</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- JS -->
+  <script src="./app.js"></script>
+</body>
+</html>
