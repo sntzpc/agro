@@ -1009,12 +1009,11 @@
     const unsynced = state.reports.filter(r => !r.synced);
     const n = unsynced.length;
 
-    if (!n){
-      card.style.display = 'none';
-      return;
-    }
+    const last = state.syncMeta?.lastSyncAt
+      ? new Date(state.syncMeta.lastSyncAt).toLocaleString('id-ID')
+      : '-';
 
-    const last = state.syncMeta?.lastSyncAt ? new Date(state.syncMeta.lastSyncAt).toLocaleString('id-ID') : '-';
+    // ✅ tampilkan walau n = 0
     const sample = unsynced
       .slice(0, 5)
       .map(r => `• ${r.type.toUpperCase()} | ${r.estate} D${r.divisi} ${r.blok} | ${r.tanggal} | ${r.actTyp}`)
@@ -1027,7 +1026,13 @@
         Total laporan: <b>${total}</b> • Belum sync: <b>${n}</b><br/>
         Sync terakhir: <b>${last}</b>
       </div>
-      <pre style="white-space:pre-wrap;font-family:monospace;background:#fff;border:1px solid #eee;padding:10px;border-radius:6px;">${sample || '-'}</pre>
+      ${
+        n
+          ? `<pre style="white-space:pre-wrap;font-family:monospace;background:#fff;border:1px solid #eee;padding:10px;border-radius:6px;">${sample}</pre>`
+          : `<div style="background:#fff;border:1px solid #eee;padding:10px;border-radius:6px;font-size:13px;">
+              ✅ Tidak ada antrian. Semua data sudah tersinkron.
+            </div>`
+      }
     `;
   }
 
@@ -1267,11 +1272,35 @@
     el.style.display = 'block';
   }
 
-  async function pullMasterYActivity(){
+  function setBtnLoading(btn, isLoading, loadingText = 'Memproses...'){
+    if (!btn) return;
+    if (isLoading){
+      btn.dataset._oldText = btn.textContent;
+      btn.textContent = loadingText;
+      btn.disabled = true;
+      btn.style.opacity = '0.7';
+      btn.style.pointerEvents = 'none';
+    } else {
+      btn.textContent = btn.dataset._oldText || btn.textContent;
+      btn.disabled = false;
+      btn.style.opacity = '';
+      btn.style.pointerEvents = '';
+    }
+  }
+
+  async function pullMasterYActivity(opts = {}){
+    const btn = $('#btnPullMasterAct');
+    const silent = !!opts.silent;
+
     if (!navigator.onLine){
-      alert('Sedang offline. Tarik master membutuhkan koneksi internet.');
+      if (!silent) alert('Sedang offline. Tarik master membutuhkan koneksi internet.');
       return;
     }
+
+    // ✅ anti double click
+    if (btn && btn.disabled) return;
+
+    setBtnLoading(btn, true, 'Menarik Master ActTyp...');
     setPullStatus('Menarik master ActTyp (yactivity)...', 'sync-warning');
 
     try{
@@ -1287,7 +1316,6 @@
       const data = await res.json();
       if (!data.success || !Array.isArray(data.items)) throw new Error(data.message || 'Response tidak valid');
 
-      // simpan ke IDB store act_master (replace store)
       await idbClear(DB.stores.act_master);
 
       const clean = data.items
@@ -1296,7 +1324,7 @@
           type: x.type,
           code: String(x.code||'').toUpperCase(),
           desc: x.desc || '',
-          job: x.job || ''  // optional default pekerjaan
+          job: x.job || ''
         }))
         .filter(x => x.type && x.code);
 
@@ -1311,10 +1339,16 @@
     }catch(err){
       console.error(err);
       setPullStatus('Gagal tarik master: ' + (err.message || 'Unknown'), 'sync-error');
+      if (!silent) alert('Gagal tarik master: ' + (err.message || 'Unknown'));
+    }finally{
+      setBtnLoading(btn, false);
     }
   }
 
   async function pullActualByNikMerge(){
+    const btn = $('#btnPullActualByNik');
+    if (btn && btn.disabled) return;
+
     const nik = (state.userInfo.nik||'').trim();
     if (!nik){
       alert('NIK peserta belum diisi. Silakan isi di Informasi Peserta.');
@@ -1325,6 +1359,7 @@
       return;
     }
 
+    setBtnLoading(btn, true, 'Menarik Data Aktual...');
     setPullStatus(`Menarik data aktual dari server untuk NIK ${nik}...`, 'sync-warning');
 
     try{
@@ -1345,12 +1380,10 @@
       let added = 0;
 
       for (const r of data.items){
-        // pastikan struktur minimal
         if (!r || r.id === undefined || r.id === null) continue;
         const idStr = String(r.id);
         if (existing.has(idStr)) continue;
 
-        // tandai sudah synced karena berasal dari server
         r.synced = true;
         state.reports.push(r);
         await saveReport(r);
@@ -1365,6 +1398,8 @@
     }catch(err){
       console.error(err);
       setPullStatus('Gagal tarik aktual: ' + (err.message || 'Unknown'), 'sync-error');
+    }finally{
+      setBtnLoading(btn, false);
     }
   }
 
@@ -1548,6 +1583,9 @@
 
   // Simpan user info dari modal
   async function saveUserInfo() {
+    const btn = $('#saveUserInfo');
+    if (btn && btn.disabled) return;
+
     const menteeName = $('#menteeName').value.trim();
     const mentorName = $('#mentorName').value.trim();
     const nik = ($('#pesertaNik') ? $('#pesertaNik').value.trim() : '').trim();
@@ -1557,11 +1595,29 @@
       return;
     }
 
-    state.userInfo = { menteeName, mentorName, nik };
-    await saveMeta();
+    // cek apakah ini penyimpanan pertama kali (sebelumnya kosong)
+    const firstTime = !state.userInfo?.nik;
 
-    $('#userInfoModal').style.display = 'none';
-    updateUserInfoDisplay();
+    setBtnLoading(btn, true, 'Menyimpan & Tarik ActTyp...');
+    try{
+      state.userInfo = { menteeName, mentorName, nik };
+      await saveMeta();
+
+      // ✅ otomatis tarik master acttyp saat awal simpan
+      if (firstTime) {
+        if (navigator.onLine){
+          await pullMasterYActivity({ silent: true });
+        } else {
+          // kalau offline, tidak gagal — hanya info
+          setPullStatus('User tersimpan. Anda offline, tarik Master ActTyp bisa dilakukan nanti saat online.', 'sync-warning');
+        }
+      }
+
+      $('#userInfoModal').style.display = 'none';
+      updateUserInfoDisplay();
+    } finally {
+      setBtnLoading(btn, false);
+    }
   }
 
   // Edit user info (prefill modal)
