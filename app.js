@@ -21,16 +21,22 @@
   /* ========================= 01) KONFIGURASI & STATE ========================= */
   // Konfigurasi integrasi Google Apps Script
   const CONFIG = {
-    scriptUrl: 'https://script.google.com/macros/s/AKfycbx_9N6wqjZrGttRcg9JPivPEjqDbDJ2TuPg8c1-Lud2X4h8cFCLQoi5aQ6iYapXbylI/exec', // ganti jika perlu
-    sheetId:   '1w2aqNwImlU7jRM28Hauh76ySH18zvEFYkHt-GaXkG3g' // ganti jika perlu
+    scriptUrl: 'https://script.google.com/macros/s/AKfycbxzGHgJGcei3e7Em2SLcvqi890D7rFVSM5YqevvoB70S-aInvJGUJ1G6eGXIiy_McBz/exec', // ganti jika perlu
+    sheetId:   '1CycrpnMS6eclMT6hYf2DUDquUL1KY6pHlUHcY4bBboE' // ganti jika perlu
   };
 
   // State aplikasi disatukan agar mudah dipantau & disimpan
   const state = {
     reports: [],
-    userInfo: {},
+    userInfo: { menteeName:'', mentorName:'', nik:'' },
     lastInputs: { perawatan: {}, panen: {} },
-    actTyps:   { perawatan: [], panen: [] }
+
+    // ActTyp
+    actMaster: [], // dari yactivity (server)
+    actCustom: [], // manual dari modal kelola
+
+    // meta sync/pull
+    syncMeta: { lastSyncAt:null, lastPullMasterAt:null, lastPullActualAt:null }
   };
 
   // Kunci localStorage (agar konsisten)
@@ -123,26 +129,182 @@
     document.body.appendChild(overlay);
   }
 
-  /* ========================= 03) PERSISTENSI (localStorage) ================== */
-  function loadData() {
-    try {
+  /* ========================= 03) PERSISTENSI (IndexedDB) ====================== */
+  /**
+   * Stores:
+   * - meta: key -> value  (userInfo, lastInputs, syncMeta, etc)
+   * - reports: laporan (keyPath: id)
+   * - act_master: master acttyp dari server (keyPath: id = `${type}|${code}`)
+   * - act_custom: acttyp custom/manual (keyPath: id = `${type}|${code}`)
+   */
+  const DB = {
+    name: 'klp1_agro_db',
+    version: 1,
+    stores: {
+      meta: 'meta',
+      reports: 'reports',
+      act_master: 'act_master',
+      act_custom: 'act_custom'
+    }
+  };
+
+  let _db = null;
+
+  function idbOpen(){
+    if (_db) return Promise.resolve(_db);
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB.name, DB.version);
+      req.onupgradeneeded = (e) => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(DB.stores.meta)) db.createObjectStore(DB.stores.meta);
+        if (!db.objectStoreNames.contains(DB.stores.reports)) db.createObjectStore(DB.stores.reports, { keyPath: 'id' });
+        if (!db.objectStoreNames.contains(DB.stores.act_master)) db.createObjectStore(DB.stores.act_master, { keyPath: 'id' });
+        if (!db.objectStoreNames.contains(DB.stores.act_custom)) db.createObjectStore(DB.stores.act_custom, { keyPath: 'id' });
+      };
+      req.onsuccess = () => { _db = req.result; resolve(_db); };
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  function idbTx(storeName, mode='readonly'){
+    return idbOpen().then(db => db.transaction(storeName, mode).objectStore(storeName));
+  }
+
+  async function idbGet(store, key){
+    const os = await idbTx(store, 'readonly');
+    return new Promise((resolve, reject) => {
+      const r = os.get(key);
+      r.onsuccess = () => resolve(r.result);
+      r.onerror = () => reject(r.error);
+    });
+  }
+  async function idbPut(store, value, key){
+    const os = await idbTx(store, 'readwrite');
+    return new Promise((resolve, reject) => {
+      const r = (key !== undefined) ? os.put(value, key) : os.put(value);
+      r.onsuccess = () => resolve(true);
+      r.onerror = () => reject(r.error);
+    });
+  }
+  async function idbDel(store, key){
+    const os = await idbTx(store, 'readwrite');
+    return new Promise((resolve, reject) => {
+      const r = os.delete(key);
+      r.onsuccess = () => resolve(true);
+      r.onerror = () => reject(r.error);
+    });
+  }
+  async function idbClear(store){
+    const os = await idbTx(store, 'readwrite');
+    return new Promise((resolve, reject) => {
+      const r = os.clear();
+      r.onsuccess = () => resolve(true);
+      r.onerror = () => reject(r.error);
+    });
+  }
+  async function idbGetAll(store){
+    const os = await idbTx(store, 'readonly');
+    return new Promise((resolve, reject) => {
+      const r = os.getAll();
+      r.onsuccess = () => resolve(r.result || []);
+      r.onerror = () => reject(r.error);
+    });
+  }
+
+  /** Migrasi 1x dari localStorage lama (kalau ada) */
+  async function migrateFromLocalStorageIfAny(){
+    try{
       const rep = localStorage.getItem(LS_KEYS.reports);
       const usr = localStorage.getItem(LS_KEYS.userInfo);
-      const last = localStorage.getItem(LS_KEYS.lastInputs);
+      const last= localStorage.getItem(LS_KEYS.lastInputs);
       const act = localStorage.getItem(LS_KEYS.actTyps);
-      if (rep)  state.reports   = JSON.parse(rep);
-      if (usr)  state.userInfo  = JSON.parse(usr);
-      if (last) state.lastInputs= JSON.parse(last);
-      if (act)  state.actTyps   = JSON.parse(act);
-    } catch (e) {
-      console.warn('Gagal load localStorage:', e);
+
+      const hasAny = rep || usr || last || act;
+      if (!hasAny) return;
+
+      if (rep){
+        const arr = JSON.parse(rep) || [];
+        for (const r of arr) await idbPut(DB.stores.reports, r);
+      }
+      if (usr)  await idbPut(DB.stores.meta, JSON.parse(usr) || {}, 'userInfo');
+      if (last) await idbPut(DB.stores.meta, JSON.parse(last) || {}, 'lastInputs');
+
+      // actTyps lama -> jadikan custom agar tidak hilang
+      if (act){
+        const old = JSON.parse(act) || { perawatan:[], panen:[] };
+        const custom = [];
+        (old.perawatan||[]).forEach(a => custom.push({ ...a, type:'perawatan', id:`perawatan|${a.code}` }));
+        (old.panen||[]).forEach(a => custom.push({ ...a, type:'panen', id:`panen|${a.code}` }));
+        for (const a of custom) await idbPut(DB.stores.act_custom, a);
+      }
+
+      // bersihkan LS lama (jangan localStorage.clear biar aman)
+      localStorage.removeItem(LS_KEYS.reports);
+      localStorage.removeItem(LS_KEYS.userInfo);
+      localStorage.removeItem(LS_KEYS.lastInputs);
+      localStorage.removeItem(LS_KEYS.actTyps);
+      console.warn('Migrasi localStorage -> IndexedDB selesai ✅');
+    }catch(e){
+      console.warn('Migrasi localStorage gagal:', e);
     }
   }
-  function saveData() {
-    localStorage.setItem(LS_KEYS.reports, JSON.stringify(state.reports));
-    localStorage.setItem(LS_KEYS.userInfo, JSON.stringify(state.userInfo));
-    localStorage.setItem(LS_KEYS.lastInputs, JSON.stringify(state.lastInputs));
-    localStorage.setItem(LS_KEYS.actTyps, JSON.stringify(state.actTyps));
+
+  /** Load state dari IndexedDB */
+  async function loadData(){
+    await migrateFromLocalStorageIfAny();
+
+    // meta
+    state.userInfo   = (await idbGet(DB.stores.meta, 'userInfo')) || {};
+    state.lastInputs = (await idbGet(DB.stores.meta, 'lastInputs')) || { perawatan:{}, panen:{} };
+    state.syncMeta   = (await idbGet(DB.stores.meta, 'syncMeta')) || { lastSyncAt:null, lastPullMasterAt:null, lastPullActualAt:null };
+
+    // reports
+    state.reports = await idbGetAll(DB.stores.reports);
+
+    // act types (master + custom)
+    const master = await idbGetAll(DB.stores.act_master);
+    const custom = await idbGetAll(DB.stores.act_custom);
+
+    state.actMaster = master; // flat list {id,type,code,desc,job}
+    state.actCustom = custom; // flat list {id,type,code,desc,job?}
+  }
+
+  /** Save potongan state (agar cepat) */
+  async function saveMeta(){
+    await idbPut(DB.stores.meta, state.userInfo || {}, 'userInfo');
+    await idbPut(DB.stores.meta, state.lastInputs || {perawatan:{}, panen:{}}, 'lastInputs');
+    await idbPut(DB.stores.meta, state.syncMeta || {}, 'syncMeta');
+  }
+  async function saveReport(report){
+    await idbPut(DB.stores.reports, report);
+  }
+  async function deleteReportById(id){
+    await idbDel(DB.stores.reports, id);
+  }
+  async function replaceAllReports(newArr){
+    await idbClear(DB.stores.reports);
+    for (const r of newArr) await idbPut(DB.stores.reports, r);
+  }
+
+  async function saveData(){
+    await replaceAllReports(state.reports || []);
+    await saveMeta();
+  }
+
+  /** Util: rebuild actTyps dropdown/suggest source */
+  function getActPoolByType(type){
+    const t = String(type);
+    const master = (state.actMaster||[]).filter(a => a.type === t);
+    const custom = (state.actCustom||[]).filter(a => a.type === t);
+    // gabungkan, prioritas custom jika code sama
+    const map = new Map();
+    master.forEach(a => map.set(a.code, a));
+    custom.forEach(a => map.set(a.code, a));
+    return Array.from(map.values()).sort((a,b)=>String(a.code).localeCompare(String(b.code)));
+  }
+  function findActInfo(type, code){
+    const pool = getActPoolByType(type);
+    return pool.find(a => String(a.code).toUpperCase() === String(code||'').toUpperCase()) || null;
   }
 
   /* ========================= 04) INISIALISASI UI ============================= */
@@ -172,7 +334,46 @@
   function updateUserInfoDisplay() {
     $('#currentMentee').textContent = state.userInfo.menteeName || '-';
     $('#currentMentor').textContent = state.userInfo.mentorName || '-';
+    const elNik = $('#currentNik');
+    if (elNik) elNik.textContent = state.userInfo.nik || '-';
   }
+
+  function ensureToast(){
+    if ($('#netToast')) return;
+    const t = document.createElement('div');
+    t.id = 'netToast';
+    t.className = 'toast';
+    t.innerHTML = `
+      <div class="row">
+        <div>
+          <div style="font-weight:700;">Koneksi online terdeteksi</div>
+          <div style="opacity:.9;font-size:13px;">Anda punya data belum sync. Mau sinkron sekarang?</div>
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button id="toastSyncNow" class="secondary">Sync</button>
+          <button id="toastClose" class="danger">Tutup</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(t);
+
+    $('#toastClose').onclick = () => { t.style.display = 'none'; };
+    $('#toastSyncNow').onclick = () => {
+      t.style.display = 'none';
+      $('.tab[data-tab="history"]').click();
+      syncWithGoogleSheet();
+    };
+  }
+
+  function showOnlineReminderIfNeeded(){
+    const unsynced = state.reports.filter(r => !r.synced).length;
+    if (!unsynced) return;
+    ensureToast();
+    const t = $('#netToast');
+    t.style.display = 'block';
+  }
+
+  window.addEventListener('online', () => showOnlineReminderIfNeeded());
 
   // Listener umum (klik tombol, change input, dll)
   function setupEventListeners() {
@@ -206,6 +407,13 @@
     $('#addActtyp').addEventListener('click', addActtyp);
     $('#resetApp').addEventListener('click', confirmResetApp);
 
+    // Pull master / actual
+    const btnPullMaster = $('#btnPullMasterAct');
+    if (btnPullMaster) btnPullMaster.addEventListener('click', pullMasterYActivity);
+
+    const btnPullActual = $('#btnPullActualByNik');
+    if (btnPullActual) btnPullActual.addEventListener('click', pullActualByNikMerge);
+
     // Simpan last inputs bila ada perubahan field (perawatan/panen)
     $$('#perawatan input, #perawatan select, #perawatan textarea').forEach(el => {
       el.addEventListener('change', () => saveLastInputs('perawatan'));
@@ -235,7 +443,7 @@
   }
 
   // Simpan nilai terakhir yang diisi pada form tertentu
-  function saveLastInputs(formType) {
+  async function saveLastInputs(formType) {
     const id = formType === 'perawatan' ? 'perawatan' : 'panen';
     const obj = {
       estate:    $(`#${id}Estate`).value,
@@ -244,7 +452,7 @@
       pekerjaan: $(`#${id}Pekerjaan`).value
     };
     state.lastInputs[formType] = obj;
-    saveData();
+    await saveMeta();
   }
 
   /* ========================= 05) FORM PERAWATAN ============================== */
@@ -276,7 +484,7 @@
   }
 
   // Simpan laporan perawatan
-  function savePerawatanReport() {
+  async function savePerawatanReport() {
     const estate   = $('#perawatanEstate').value.trim();
     const divisi   = $('#perawatanDivisi').value;
     const blok     = $('#perawatanBlok').value.trim();
@@ -322,15 +530,20 @@
     };
 
     state.reports.push(report);
-    saveData();
+    await saveReport(report);
+    await saveMeta(); // agar lastInputs/userInfo tetap tersimpan
     displayHistory();
     alert('Laporan perawatan berhasil disimpan!');
     resetPerawatanForm(true);
   }
 
   // Reset form perawatan (preserveLastInputs = true agar tidak hapus lastInputs)
-  function resetPerawatanForm(preserveLastInputs = false) {
-    if (!preserveLastInputs) { state.lastInputs.perawatan = {}; saveData(); }
+    function resetPerawatanForm(preserveLastInputs = false) {
+    if (!preserveLastInputs) {
+      state.lastInputs.perawatan = {};
+      // simpan meta async tanpa menghambat UI
+      saveMeta().catch(console.warn);
+    }
     $('#perawatanBlok').value = '';
     $('#perawatanRencanaHa').value = '';
     $('#perawatanAktualHa').value = '';
@@ -425,7 +638,7 @@
   }
 
   /* ========================= 06) FORM PANEN ================================== */
-  function savePanenReport() {
+  async function savePanenReport() {
     const estate   = $('#panenEstate').value.trim();
     const divisi   = $('#panenDivisi').value;
     const blok     = $('#panenBlok').value.trim();
@@ -467,14 +680,18 @@
     };
 
     state.reports.push(report);
-    saveData();
+    await saveReport(report);
+    await saveMeta();
     displayHistory();
     alert('Laporan panen berhasil disimpan!');
     resetPanenForm(true);
   }
 
-  function resetPanenForm(preserveLastInputs = false) {
-    if (!preserveLastInputs) { state.lastInputs.panen = {}; saveData(); }
+    function resetPanenForm(preserveLastInputs = false) {
+    if (!preserveLastInputs) {
+      state.lastInputs.panen = {};
+      saveMeta().catch(console.warn);
+    }
     $('#panenBlok').value = '';
     $('#panenRencanaHa').value = '';
     $('#panenRencanaTon').value = '';
@@ -607,17 +824,63 @@
   /* ========================= 07) ACTTYP MANAGEMENT =========================== */
   // Load acttyp ke dropdown (perawatan & panen)
   function loadActTyps() {
-    const perSel = $('#perawatanActTyp');
-    const panSel = $('#panenActTyp');
-    perSel.innerHTML = ''; panSel.innerHTML = '';
-    perSel.add(new Option('Pilih ActTyp...', ''));
-    panSel.add(new Option('Pilih ActTyp...', ''));
-    state.actTyps.perawatan.forEach(a => perSel.add(new Option(`${a.code} - ${a.desc}`, a.code)));
-    state.actTyps.panen.forEach(a => panSel.add(new Option(`${a.code} - ${a.desc}`, a.code)));
+    // karena sekarang ActTyp pakai input + datalist
+    const perDL = $('#acttypPerawatanList');
+    const panDL = $('#acttypPanenList');
+    if (!perDL || !panDL) return;
+
+    perDL.innerHTML = '';
+    panDL.innerHTML = '';
+
+    const perPool = getActPoolByType('perawatan');
+    const panPool = getActPoolByType('panen');
+
+    perPool.forEach(a => {
+      const opt = document.createElement('option');
+      opt.value = a.code;
+      opt.label = `${a.code} - ${a.desc}${a.job ? ' | ' + a.job : ''}`;
+      perDL.appendChild(opt);
+    });
+
+    panPool.forEach(a => {
+      const opt = document.createElement('option');
+      opt.value = a.code;
+      opt.label = `${a.code} - ${a.desc}${a.job ? ' | ' + a.job : ''}`;
+      panDL.appendChild(opt);
+    });
 
     // set last selected
-    if (state.lastInputs.perawatan.actTyp) perSel.value = state.lastInputs.perawatan.actTyp;
-    if (state.lastInputs.panen.actTyp)      panSel.value = state.lastInputs.panen.actTyp;
+    if (state.lastInputs.perawatan?.actTyp) $('#perawatanActTyp').value = state.lastInputs.perawatan.actTyp;
+    if (state.lastInputs.panen?.actTyp) $('#panenActTyp').value = state.lastInputs.panen.actTyp;
+  }
+
+  function wireActTypAutoJob(){
+    const per = $('#perawatanActTyp');
+    const pan = $('#panenActTyp');
+
+    const onPick = (type) => {
+      const actInput = type === 'perawatan' ? per : pan;
+      const jobInput = type === 'perawatan' ? $('#perawatanPekerjaan') : $('#panenPekerjaan');
+      if (!actInput || !jobInput) return;
+
+      const code = actInput.value.trim().toUpperCase();
+      const info = findActInfo(type, code);
+      if (!info) return;
+
+      // otomatis isi pekerjaan sesuai job/default (kalau ada), fallback desc
+      const autoText = (info.job || info.desc || '').trim();
+      if (!autoText) return;
+
+      // hanya auto-isi jika kosong atau sama dengan last auto sebelumnya
+      if (!jobInput.value.trim()) jobInput.value = autoText;
+    };
+
+    if (per) per.addEventListener('change', () => onPick('perawatan'));
+    if (pan) pan.addEventListener('change', () => onPick('panen'));
+
+    // juga saat mengetik (ketika cocok dengan datalist)
+    if (per) per.addEventListener('blur', () => onPick('perawatan'));
+    if (pan) pan.addEventListener('blur', () => onPick('panen'));
   }
 
   // Buka modal kelola acttyp + render list
@@ -626,14 +889,18 @@
     const list  = $('#acttypList');
     list.innerHTML = '';
 
-    state.actTyps.perawatan.forEach(a => {
+    const customPer = (state.actCustom||[]).filter(a => a.type === 'perawatan');
+    const customPan = (state.actCustom||[]).filter(a => a.type === 'panen');
+
+    customPer.forEach(a => {
       const div = document.createElement('div');
       div.style.marginBottom = '10px';
       div.innerHTML = `<strong>Perawatan:</strong> ${a.code} - ${a.desc}
         <button class="remove-acttyp" data-type="perawatan" data-code="${a.code}" style="float:right;">Hapus</button>`;
       list.appendChild(div);
     });
-    state.actTyps.panen.forEach(a => {
+
+    customPan.forEach(a => {
       const div = document.createElement('div');
       div.style.marginBottom = '10px';
       div.innerHTML = `<strong>Panen:</strong> ${a.code} - ${a.desc}
@@ -642,15 +909,17 @@
     });
 
     $$('.remove-acttyp', list).forEach(btn => {
-      btn.addEventListener('click', function () {
+      btn.addEventListener('click', async function () {
         const type = this.dataset.type;
         const code = this.dataset.code;
-        if (confirm(`Apakah Anda yakin ingin menghapus ActTyp ${code}?`)) {
-          state.actTyps[type] = state.actTyps[type].filter(x => x.code !== code);
-          saveData();
-          loadActTyps();
-          manageActtyp(); // refresh list
-        }
+        if (!confirm(`Apakah Anda yakin ingin menghapus ActTyp custom ${code}?`)) return;
+
+        const id = `${type}|${code}`;
+        state.actCustom = (state.actCustom||[]).filter(x => x.id !== id);
+        await idbDel(DB.stores.act_custom, id);
+
+        loadActTyps();
+        manageActtyp();
       });
     });
 
@@ -658,21 +927,29 @@
   }
 
   // Tambah acttyp baru
-  function addActtyp() {
+  async function addActtyp() {
     const type = $('#acttypType').value;
     const code = $('#newActtypCode').value.trim().toUpperCase();
     const desc = $('#newActtypDesc').value.trim();
     if (!code || !desc) { alert('Kode dan Deskripsi ActTyp harus diisi!'); return; }
-    if (state.actTyps[type].some(a => a.code === code)) {
-      alert(`Kode ${code} sudah ada untuk jenis ${type}!`); return;
+
+    const id = `${type}|${code}`;
+
+    // cegah duplikat custom
+    if ((state.actCustom||[]).some(a => a.id === id)) {
+      alert(`Kode ${code} sudah ada di custom untuk jenis ${type}!`); return;
     }
-    state.actTyps[type].push({ code, desc });
-    saveData();
-    loadActTyps();
+
+    const obj = { id, type, code, desc };
+    state.actCustom.push(obj);
+    await idbPut(DB.stores.act_custom, obj);
+
     $('#newActtypCode').value = '';
     $('#newActtypDesc').value = '';
+
+    loadActTyps();
     manageActtyp();
-    alert(`ActTyp ${code} - ${desc} berhasil ditambahkan!`);
+    alert(`ActTyp custom ${code} - ${desc} berhasil ditambahkan!`);
   }
 
   /* ========================= 08) HISTORY & STATISTIK ========================= */
@@ -714,6 +991,7 @@
     $$('.delete-btn').forEach(b => b.addEventListener('click', () => deleteReport(b.dataset.id)));
 
     updateStats();
+    renderSyncQueueCard();
   }
 
   // Update ringkasan statistik (total, perawatan, panen)
@@ -721,6 +999,36 @@
     $('#totalReports').textContent   = state.reports.length;
     $('#totalPerawatan').textContent = state.reports.filter(r => r.type === 'perawatan').length;
     $('#totalPanen').textContent     = state.reports.filter(r => r.type === 'panen').length;
+  }
+
+  function renderSyncQueueCard(){
+    const card = $('#syncQueueCard');
+    if (!card) return;
+
+    const total = state.reports.length;
+    const unsynced = state.reports.filter(r => !r.synced);
+    const n = unsynced.length;
+
+    if (!n){
+      card.style.display = 'none';
+      return;
+    }
+
+    const last = state.syncMeta?.lastSyncAt ? new Date(state.syncMeta.lastSyncAt).toLocaleString('id-ID') : '-';
+    const sample = unsynced
+      .slice(0, 5)
+      .map(r => `• ${r.type.toUpperCase()} | ${r.estate} D${r.divisi} ${r.blok} | ${r.tanggal} | ${r.actTyp}`)
+      .join('\n');
+
+    card.style.display = 'block';
+    card.innerHTML = `
+      <h4>Antrian Sinkronisasi <span class="queue-badge">${n}</span></h4>
+      <div style="font-size:13px;opacity:.9;margin-bottom:8px;">
+        Total laporan: <b>${total}</b> • Belum sync: <b>${n}</b><br/>
+        Sync terakhir: <b>${last}</b>
+      </div>
+      <pre style="white-space:pre-wrap;font-family:monospace;background:#fff;border:1px solid #eee;padding:10px;border-radius:6px;">${sample || '-'}</pre>
+    `;
   }
 
   // Detail laporan (alert sederhana)
@@ -758,7 +1066,7 @@
   }
 
   // Muat laporan ke form untuk diedit (menghapus sementara dari list agar tidak dobel)
-  function editReport(id) {
+  async function editReport(id) {
     const r = state.reports.find(x => String(x.id) === String(id));
     if (!r) return;
 
@@ -784,8 +1092,8 @@
       else addPerawatanMaterialInput();
 
       state.reports = state.reports.filter(x => String(x.id) !== String(id));
-      saveData();
-    } else {
+      await deleteReportById(r.id);;
+        } else {
       $('.tab[data-tab="panen"]').click();
       $('#panenEstate').value = r.estate;
       $('#panenDivisi').value = r.divisi;
@@ -805,17 +1113,18 @@
       $('#panenTruk').value = r.truk;
       $('#panenKeterangan').value = r.keterangan;
 
+      // ✅ hapus dari state + IndexedDB agar tidak dobel
       state.reports = state.reports.filter(x => String(x.id) !== String(id));
-      saveData();
+      await deleteReportById(r.id);
     }
     alert('Laporan dimuat ke form untuk diedit. Silakan perbaiki data dan simpan kembali.');
   }
 
   // Hapus laporan
-  function deleteReport(id) {
+  async function deleteReport(id) {
     if (!confirm('Apakah Anda yakin ingin menghapus laporan ini?')) return;
     state.reports = state.reports.filter(r => String(r.id) !== String(id));
-    saveData();
+    await deleteReportById(Number(id) || id);
     displayHistory();
   }
 
@@ -874,11 +1183,12 @@
   }
 
   // Import dari Excel -> merge (hindari duplikat ID)
-  function importFromExcel(evt) {
+    function importFromExcel(evt) {
     const file = evt.target.files[0];
     if (!file) return;
+
     const reader = new FileReader();
-    reader.onload = e => {
+    reader.onload = async (e) => {
       try {
         const wb = XLSX.read(e.target.result, { type: 'binary' });
         const ws = wb.Sheets[wb.SheetNames[0]];
@@ -896,21 +1206,22 @@
             rencanaHa: row['Rencana Ha'] || 0,
             aktualHa: row['Aktual Ha'] || 0,
             keterangan: row.Keterangan || '',
-            synced: row.Synced === 'TRUE' || false
+            synced: row.Synced === 'TRUE' || row.Synced === true || false
           };
+
           if (row.Tipe === 'perawatan') {
             base.workers = [];
             base.materials = [];
             if (row['Tenaga Kerja']) {
               row['Tenaga Kerja'].split(';').forEach(s => {
                 const [type, cnt] = s.split(':');
-                if (type && cnt) base.workers.push({ type: type.trim(), count: parseInt(cnt) });
+                if (type && cnt) base.workers.push({ type: type.trim(), count: parseInt(cnt) || 0 });
               });
             }
             if (row['Bahan']) {
               row['Bahan'].split(';').forEach(s => {
                 const [type, qty, unit] = s.split(':');
-                if (type && qty) base.materials.push({ type: type.trim(), quantity: parseFloat(qty), unit: unit || '' });
+                if (type && qty) base.materials.push({ type: type.trim(), quantity: parseFloat(qty) || 0, unit: unit || '' });
               });
             }
           } else {
@@ -931,7 +1242,11 @@
         if (!newOnes.length) { alert('Semua data dalam file sudah ada di sistem!'); return; }
 
         state.reports = [...state.reports, ...newOnes];
-        saveData();
+
+        // ✅ simpan hanya yang baru ke IndexedDB
+        for (const r of newOnes) await saveReport(r);
+        await saveMeta();
+
         displayHistory();
         alert(`Berhasil mengimpor ${newOnes.length} laporan baru!`);
       } catch (err) {
@@ -939,14 +1254,125 @@
         alert('Gagal mengimpor data. Pastikan format file sesuai!');
       }
     };
+
     reader.readAsBinaryString(file);
     evt.target.value = '';
   }
 
+  function setPullStatus(msg, type='sync-warning'){
+    const el = $('#pullStatus');
+    if (!el) return;
+    el.textContent = msg;
+    el.className = 'sync-status ' + type;
+    el.style.display = 'block';
+  }
+
+  async function pullMasterYActivity(){
+    if (!navigator.onLine){
+      alert('Sedang offline. Tarik master membutuhkan koneksi internet.');
+      return;
+    }
+    setPullStatus('Menarik master ActTyp (yactivity)...', 'sync-warning');
+
+    try{
+      const res = await fetch(CONFIG.scriptUrl, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          action:'getYActivity',
+          sheetId: CONFIG.sheetId
+        })
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (!data.success || !Array.isArray(data.items)) throw new Error(data.message || 'Response tidak valid');
+
+      // simpan ke IDB store act_master (replace store)
+      await idbClear(DB.stores.act_master);
+
+      const clean = data.items
+        .map(x => ({
+          id: `${x.type}|${String(x.code||'').toUpperCase()}`,
+          type: x.type,
+          code: String(x.code||'').toUpperCase(),
+          desc: x.desc || '',
+          job: x.job || ''  // optional default pekerjaan
+        }))
+        .filter(x => x.type && x.code);
+
+      for (const a of clean) await idbPut(DB.stores.act_master, a);
+
+      state.actMaster = clean;
+      state.syncMeta.lastPullMasterAt = new Date().toISOString();
+      await saveMeta();
+
+      loadActTyps();
+      setPullStatus(`Berhasil tarik master ActTyp: ${clean.length} data.`, 'sync-success');
+    }catch(err){
+      console.error(err);
+      setPullStatus('Gagal tarik master: ' + (err.message || 'Unknown'), 'sync-error');
+    }
+  }
+
+  async function pullActualByNikMerge(){
+    const nik = (state.userInfo.nik||'').trim();
+    if (!nik){
+      alert('NIK peserta belum diisi. Silakan isi di Informasi Peserta.');
+      return;
+    }
+    if (!navigator.onLine){
+      alert('Sedang offline. Tarik data aktual membutuhkan koneksi internet.');
+      return;
+    }
+
+    setPullStatus(`Menarik data aktual dari server untuk NIK ${nik}...`, 'sync-warning');
+
+    try{
+      const res = await fetch(CONFIG.scriptUrl, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          action:'getActualByNIK',
+          sheetId: CONFIG.sheetId,
+          nik: nik
+        })
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (!data.success || !Array.isArray(data.items)) throw new Error(data.message || 'Response tidak valid');
+
+      const existing = new Set(state.reports.map(r => String(r.id)));
+      let added = 0;
+
+      for (const r of data.items){
+        // pastikan struktur minimal
+        if (!r || r.id === undefined || r.id === null) continue;
+        const idStr = String(r.id);
+        if (existing.has(idStr)) continue;
+
+        // tandai sudah synced karena berasal dari server
+        r.synced = true;
+        state.reports.push(r);
+        await saveReport(r);
+        added++;
+      }
+
+      state.syncMeta.lastPullActualAt = new Date().toISOString();
+      await saveMeta();
+
+      displayHistory();
+      setPullStatus(`Selesai. Data baru yang di-merge: ${added} laporan.`, 'sync-success');
+    }catch(err){
+      console.error(err);
+      setPullStatus('Gagal tarik aktual: ' + (err.message || 'Unknown'), 'sync-error');
+    }
+  }
+
   /* ========================= 10) SYNC GOOGLE SHEETS ========================== */
   // Sinkronisasi hanya data yang belum synced
-  function syncWithGoogleSheet() {
+    async function syncWithGoogleSheet() {
     if (!state.reports.length) { alert('Tidak ada data untuk disinkronisasi!'); return; }
+
     const unsynced = state.reports.filter(r => !r.synced);
     if (!unsynced.length) { alert('Semua data sudah tersinkronisasi!'); return; }
 
@@ -969,50 +1395,67 @@
       aktualHa: r.aktualHa || 0,
       rencanaTon: r.type === 'panen' ? (r.rencanaTon || 0) : undefined,
       aktualTon: r.type === 'panen' ? (r.aktualTon || 0) : undefined,
-      tenagaKerja: r.tenagaKerja || 0,
+      tenagaKerja: r.type === 'panen' ? (r.tenagaKerja || 0) : 0,
       kirimTon: r.type === 'panen' ? (r.kirimTon || 0) : undefined,
       restan: r.type === 'panen' ? (r.restan || 0) : undefined,
       pusingan: r.type === 'panen' ? (r.pusingan || '') : undefined,
       feeder: r.type === 'panen' ? (r.feeder || '') : undefined,
       truk: r.type === 'panen' ? (r.truk || '') : undefined,
       keterangan: r.keterangan || '',
+      nik: state.userInfo.nik || '',
       menteeName: state.userInfo.menteeName || '',
       mentorName: state.userInfo.mentorName || '',
       workers: r.workers || [],
       materials: r.materials || []
     }));
 
-    fetch(CONFIG.scriptUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        action: 'appendData',
-        sheetId: CONFIG.sheetId,
-        timestamp: new Date().toISOString(),
-        data: payload
-      })
-    })
-      .then(res => { if (!res.ok) throw new Error(`HTTP ${res.status}`); return res.json(); })
-      .then(data => {
-        if (!data.success || !Array.isArray(data.syncedIds)) throw new Error(data.message || 'Response tidak valid');
-
-        data.syncedIds.forEach(id => {
-          const r = state.reports.find(x => String(x.id) === String(id));
-          if (r) r.synced = true;
-        });
-        saveData();
-        displayHistory();
-
-        status.textContent = `Berhasil sinkronisasi ${data.syncedIds.length} laporan!`;
-        status.className = 'sync-status sync-success';
-      })
-      .catch(err => {
-        console.error('Sync error:', err);
-        status.textContent = 'Gagal sinkronisasi: ' + (err.message || 'Unknown error');
-        status.className = 'sync-status sync-error';
-        // fallback JSONP
-        tryJsonpSync(payload);
+    try {
+      const res = await fetch(CONFIG.scriptUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'appendData',
+          sheetId: CONFIG.sheetId,
+          timestamp: new Date().toISOString(),
+          data: payload
+        })
       });
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+
+      if (!data.success || !Array.isArray(data.syncedIds)) {
+        throw new Error(data.message || 'Response tidak valid');
+      }
+
+      // ✅ tandai synced + simpan ke IndexedDB
+      for (const id of data.syncedIds) {
+        const r = state.reports.find(x => String(x.id) === String(id));
+        if (r) {
+          r.synced = true;
+          await saveReport(r);
+        }
+      }
+
+      state.syncMeta.lastSyncAt = new Date().toISOString();
+      await saveMeta();
+
+      displayHistory();
+      status.textContent = `Berhasil sinkronisasi ${data.syncedIds.length} laporan!`;
+      status.className = 'sync-status sync-success';
+
+    } catch (err) {
+      console.error('Sync error:', err);
+      status.textContent = 'Gagal sinkronisasi: ' + (err.message || 'Unknown error');
+      status.className = 'sync-status sync-error';
+
+      // fallback JSONP
+      try {
+        await tryJsonpSync(payload);
+      } catch (e) {
+        console.error('JSONP sync failed:', e);
+      }
+    }
   }
 
   // Fallback JSONP bila fetch gagal (mis. CORS)
@@ -1021,24 +1464,38 @@
       const cb = 'jsonpCallback_' + Math.round(100000 * Math.random());
       const status = $('#syncStatus');
 
-      window[cb] = function (data) {
+        window[cb] = function (data) {
         delete window[cb];
-        if (data.success) {
-          data.syncedIds.forEach(id => {
-            const r = state.reports.find(x => String(x.id) === String(id));
-            if (r) r.synced = true;
-          });
-          saveData();
-          displayHistory();
 
-          status.textContent = `Berhasil sinkronisasi ${data.syncedIds.length} laporan (JSONP)!`;
-          status.className = 'sync-status sync-success';
-          resolve(data);
-        } else {
-          status.textContent = 'Gagal sinkronisasi: ' + (data.message || 'JSONP error');
+        (async () => {
+          if (data && data.success) {
+            for (const id of (data.syncedIds || [])) {
+              const r = state.reports.find(x => String(x.id) === String(id));
+              if (r) {
+                r.synced = true;
+                await saveReport(r);
+              }
+            }
+
+            state.syncMeta.lastSyncAt = new Date().toISOString();
+            await saveMeta();
+
+            displayHistory();
+
+            status.textContent = `Berhasil sinkronisasi ${(data.syncedIds || []).length} laporan (JSONP)!`;
+            status.className = 'sync-status sync-success';
+            resolve(data);
+          } else {
+            status.textContent = 'Gagal sinkronisasi: ' + ((data && data.message) || 'JSONP error');
+            status.className = 'sync-status sync-error';
+            reject(new Error((data && data.message) || 'JSONP error'));
+          }
+        })().catch(err => {
+          console.error(err);
+          status.textContent = 'Gagal sinkronisasi: ' + (err.message || 'JSONP error');
           status.className = 'sync-status sync-error';
-          reject(new Error(data.message || 'JSONP error'));
-        }
+          reject(err);
+        });
       };
 
       const s = document.createElement('script');
@@ -1060,43 +1517,49 @@
   }
 
   /* ========================= 11) RESET APP =================================== */
-  function confirmDeleteAllData() {
-    if (!confirm('Apakah Anda yakin ingin menghapus SEMUA data laporan? Tindakan ini tidak dapat dibatalkan!')) return;
+  async function confirmDeleteAllData() {
+    if (!confirm('Apakah Anda yakin ingin menghapus SEMUA data laporan? (User/NIK dan ActTyp master/custom tetap aman)')) return;
+
     state.reports = [];
-    saveData();
+    await idbClear(DB.stores.reports);
+
     displayHistory();
     alert('Semua data laporan telah dihapus!');
   }
 
-  function confirmResetApp() {
-    if (!confirm('Apakah Anda yakin ingin RESET APLIKASI? Semua data termasuk laporan, pengguna, dan pengaturan akan dihapus!')) return;
-    localStorage.clear();
-    state.reports = [];
-    state.userInfo = {};
-    state.lastInputs = { perawatan: {}, panen: {} };
-    state.actTyps = {
-      perawatan: [
-        { code: 'TMPM01', desc: 'Pemupukan manual' },
-        { code: 'TMPM02', desc: 'Penyemprotan manual' },
-        { code: 'TMPM03', desc: 'Pemangkasan manual' },
-        { code: 'TMPM04', desc: 'Penyiangan manual' }
-      ],
-      panen: [
-        { code: 'PNKT01', desc: 'Panen' },
-        { code: 'PNKT02', desc: 'Transport' }
-      ]
-    };
-    saveData();
-    location.reload();
-  }
+  async function confirmResetApp() {
+  if (!confirm('Apakah Anda yakin ingin RESET APLIKASI? Semua data lokal (laporan + user + master + custom) akan dihapus!')) return;
+
+  await idbClear(DB.stores.reports);
+  await idbClear(DB.stores.act_master);
+  await idbClear(DB.stores.act_custom);
+  await idbClear(DB.stores.meta);
+
+  // reset state in-memory
+  state.reports = [];
+  state.userInfo = { menteeName:'', mentorName:'', nik:'' };
+  state.lastInputs = { perawatan:{}, panen:{} };
+  state.actMaster = [];
+  state.actCustom = [];
+  state.syncMeta = { lastSyncAt:null, lastPullMasterAt:null, lastPullActualAt:null };
+
+  location.reload();
+}
 
   // Simpan user info dari modal
-  function saveUserInfo() {
+  async function saveUserInfo() {
     const menteeName = $('#menteeName').value.trim();
     const mentorName = $('#mentorName').value.trim();
-    if (!menteeName || !mentorName) { alert('Nama Mentee dan Mentor harus diisi!'); return; }
-    state.userInfo = { menteeName, mentorName };
-    saveData();
+    const nik = ($('#pesertaNik') ? $('#pesertaNik').value.trim() : '').trim();
+
+    if (!menteeName || !mentorName || !nik) {
+      alert('Nama Mentee, Nama Mentor, dan NIK Peserta harus diisi!');
+      return;
+    }
+
+    state.userInfo = { menteeName, mentorName, nik };
+    await saveMeta();
+
     $('#userInfoModal').style.display = 'none';
     updateUserInfoDisplay();
   }
@@ -1105,15 +1568,16 @@
   function editUserInfo() {
     $('#menteeName').value = state.userInfo.menteeName || '';
     $('#mentorName').value = state.userInfo.mentorName || '';
+    if ($('#pesertaNik')) $('#pesertaNik').value = state.userInfo.nik || '';
     $('#userInfoModal').style.display = 'block';
   }
 
   /* ========================= 12) APP INIT ==================================== */
-  document.addEventListener('DOMContentLoaded', () => {
-    loadData();
+  document.addEventListener('DOMContentLoaded', async () => {
+    await loadData();
 
-    // Jika user info kosong, paksa isi modal
-    if (!state.userInfo.menteeName || !state.userInfo.mentorName) {
+    // Jika user info kosong, paksa isi modal (sekarang termasuk NIK)
+    if (!state.userInfo.menteeName || !state.userInfo.mentorName || !state.userInfo.nik) {
       $('#userInfoModal').style.display = 'block';
     } else {
       updateUserInfoDisplay();
@@ -1128,9 +1592,15 @@
     addPerawatanWorkerInput();
     addPerawatanMaterialInput();
 
-    // Tampilkan history & dropdown ActTyp
-    displayHistory();
+    // ActTyp suggest + auto pekerjaan
     loadActTyps();
+    wireActTypAutoJob();
+
+    // History awal
+    displayHistory();
+
+    // kalau online dan ada antrian, ingatkan
+    if (navigator.onLine) showOnlineReminderIfNeeded();
   });
 
 })();

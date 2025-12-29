@@ -27,6 +27,11 @@
         <h2>Informasi Peserta</h2>
 
         <div class="form-group">
+          <label for="pesertaNik">NIK Peserta:</label>
+          <input id="pesertaNik" type="text" inputmode="numeric" placeholder="Contoh: 2025xxxxx" required />
+        </div>
+
+        <div class="form-group">
           <label for="menteeName">Nama Mentee:</label>
           <input id="menteeName" type="text" required />
         </div>
@@ -86,9 +91,9 @@
         <input id="perawatanEstate" type="text" list="estateList" />
         <datalist id="estateList">
           <option value="SRIE">
-          <option value="KRAI">
-          <option value="BAMI">
-          <option value="TOLI">
+          <option value="STWE">
+          <option value="SJRE">
+          <option value="SKSE">
         </datalist>
       </div>
 
@@ -109,7 +114,8 @@
 
       <div class="form-group">
         <label for="perawatanActTyp">ActTyp:</label>
-        <select id="perawatanActTyp"></select>
+        <input id="perawatanActTyp" type="text" list="acttypPerawatanList" placeholder="Ketik kode/desk... (auto suggest)" />
+        <datalist id="acttypPerawatanList"></datalist>
       </div>
 
       <div class="form-group">
@@ -179,7 +185,8 @@
 
       <div class="form-group">
         <label for="panenActTyp">ActTyp:</label>
-        <select id="panenActTyp"></select>
+        <input id="panenActTyp" type="text" list="acttypPanenList" placeholder="Ketik kode/desk... (auto suggest)" />
+        <datalist id="acttypPanenList"></datalist>
       </div>
 
       <div class="form-group">
@@ -265,6 +272,8 @@
 
       <div id="syncStatus" class="sync-status"></div>
 
+      <div id="syncQueueCard" class="queue-card" style="display:none;"></div>
+
       <div class="stats-container">
         <div class="stat-card">
           <div class="stat-title">Total Laporan</div>
@@ -320,6 +329,7 @@
 
       <div class="form-group">
         <h3>Informasi Pengguna</h3>
+        <p>NIK Peserta: <span id="currentNik">-</span></p>
         <p>Mentee: <span id="currentMentee">-</span></p>
         <p>Mentor: <span id="currentMentor">-</span></p>
         <button id="editUserInfo">Edit Informasi Pengguna</button>
