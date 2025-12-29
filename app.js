@@ -1288,6 +1288,26 @@
     }
   }
 
+  // ✅ POST ke GAS tanpa CORS preflight (form-urlencoded)
+  async function postToGAS(payloadObj){
+    const body = new URLSearchParams();
+    body.set('data', JSON.stringify(payloadObj));
+
+    const res = await fetch(CONFIG.scriptUrl, {
+      method: 'POST',
+      body, // <-- jangan set headers!
+      // credentials: 'omit' // default
+    });
+
+    // kalau GAS sedang error, kadang res.ok true tapi json invalid
+    const text = await res.text();
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      throw new Error(`Response bukan JSON: ${text.slice(0, 200)}`);
+    }
+  }
+
   async function pullMasterYActivity(opts = {}){
     const btn = $('#btnPullMasterAct');
     const silent = !!opts.silent;
@@ -1304,18 +1324,14 @@
     setPullStatus('Menarik master ActTyp (yactivity)...', 'sync-warning');
 
     try{
-      const res = await fetch(CONFIG.scriptUrl, {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({
-          action:'getYActivity',
-          sheetId: CONFIG.sheetId
-        })
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      if (!data.success || !Array.isArray(data.items)) throw new Error(data.message || 'Response tidak valid');
+      const data = await postToGAS({
+      action: 'getYActivity',
+      sheetId: CONFIG.sheetId
+    });
 
+    if (!data.success || !Array.isArray(data.items)) {
+      throw new Error(data.message || 'Response tidak valid');
+    }
       await idbClear(DB.stores.act_master);
 
       const clean = data.items
@@ -1363,18 +1379,15 @@
     setPullStatus(`Menarik data aktual dari server untuk NIK ${nik}...`, 'sync-warning');
 
     try{
-      const res = await fetch(CONFIG.scriptUrl, {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({
-          action:'getActualByNIK',
-          sheetId: CONFIG.sheetId,
-          nik: nik
-        })
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      if (!data.success || !Array.isArray(data.items)) throw new Error(data.message || 'Response tidak valid');
+      const data = await postToGAS({
+      action: 'getActualByNIK',
+      sheetId: CONFIG.sheetId,
+      nik: nik
+    });
+
+    if (!data.success || !Array.isArray(data.items)) {
+      throw new Error(data.message || 'Response tidak valid');
+    }
 
       const existing = new Set(state.reports.map(r => String(r.id)));
       let added = 0;
@@ -1445,23 +1458,16 @@
     }));
 
     try {
-      const res = await fetch(CONFIG.scriptUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'appendData',
-          sheetId: CONFIG.sheetId,
-          timestamp: new Date().toISOString(),
-          data: payload
-        })
-      });
+      const data = await postToGAS({
+      action: 'appendData',
+      sheetId: CONFIG.sheetId,
+      timestamp: new Date().toISOString(),
+      data: payload
+    });
 
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-
-      if (!data.success || !Array.isArray(data.syncedIds)) {
-        throw new Error(data.message || 'Response tidak valid');
-      }
+    if (!data.success || !Array.isArray(data.syncedIds)) {
+      throw new Error(data.message || 'Response tidak valid');
+    }
 
       // ✅ tandai synced + simpan ke IndexedDB
       for (const id of data.syncedIds) {
